@@ -127,6 +127,7 @@ found:
   p->context.ra = (uint64)forkret;
   p->context.sp = p->kstack + PGSIZE;
 
+  p->tracemask = 0; // initialize tracemask to 0
   return p;
 }
 
@@ -294,6 +295,7 @@ fork(void)
   pid = np->pid;
 
   np->state = RUNNABLE;
+  np->tracemask = p->tracemask;
 
   release(&np->lock);
 
