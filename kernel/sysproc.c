@@ -6,6 +6,7 @@
 #include "memlayout.h"
 #include "spinlock.h"
 #include "proc.h"
+#include "sysinfo.h" // 添加sysinfo头文件
 
 uint64
 sys_exit(void)
@@ -104,5 +105,27 @@ sys_trace(void)
   if(argint(0, &n) < 0)
     return -1;
   myproc()->tracemask = n;
+  return 0;
+}
+
+uint64
+sys_sysinfo(void)
+{
+  // 获取空闲内存和非UNUSED进程数
+  struct sysinfo info;
+  freemem(&info.freemem);
+  num_proc(&info.nproc);
+
+  // 获取用户进程sysinfo参数地址（虚拟地址）
+  uint64 p;
+  if(argaddr(0, &p) < 0)
+    return -1;
+
+  // 获取当前进程，拷贝内核sysinfo到用户空间sysinfo
+  struct proc *proc = myproc();  
+  if(copyout(proc->pagetable, p, (char *)&info, sizeof(info)) < 0)
+    return -1;
+
+  // 运行成功
   return 0;
 }

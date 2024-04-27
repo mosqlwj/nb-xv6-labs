@@ -695,3 +695,22 @@ procdump(void)
     printf("\n");
   }
 }
+
+
+// 统计活跃进程数目（非UNUSED）
+
+void 
+num_proc(uint64* num) 
+{
+  *num = 0;
+
+  struct proc* p;
+  for (p = proc; p < &proc[NPROC]; p++) {
+    acquire(&p->lock);
+    if (p->state != UNUSED) {
+      (*num)++;
+    }
+    release(&p->lock);
+  }
+
+}

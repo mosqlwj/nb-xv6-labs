@@ -80,3 +80,19 @@ kalloc(void)
     memset((char*)r, 5, PGSIZE); // fill with junk
   return (void*)r;
 }
+
+
+// 获取剩余空闲内存大小（字节数）
+void
+freemem(uint64* free)
+{
+  *free = 0;
+  struct run* p = kmem.freelist;
+
+  acquire(&kmem.lock);
+  while (p) {
+    *free += PGSIZE;
+    p = p->next;
+  }
+  release(&kmem.lock);
+}
