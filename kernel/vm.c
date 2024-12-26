@@ -5,6 +5,8 @@
 #include "riscv.h"
 #include "defs.h"
 #include "fs.h"
+#include "spinlock.h"
+#include "proc.h"
 
 /*
  * the kernel's page table.
@@ -131,8 +133,8 @@ kvmpa(uint64 va)
   uint64 off = va % PGSIZE;
   pte_t *pte;
   uint64 pa;
-  
-  pte = walk(kernel_pagetable, va, 0);
+  ////////////////////////////////
+  pte = walk(myproc()->kpt, va, 0);
   if(pte == 0)
     panic("kvmpa");
   if((*pte & PTE_V) == 0)
@@ -379,23 +381,24 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 int
 copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
 {
-  uint64 n, va0, pa0;
+  // uint64 n, va0, pa0;
 
-  while(len > 0){
-    va0 = PGROUNDDOWN(srcva);
-    pa0 = walkaddr(pagetable, va0);
-    if(pa0 == 0)
-      return -1;
-    n = PGSIZE - (srcva - va0);
-    if(n > len)
-      n = len;
-    memmove(dst, (void *)(pa0 + (srcva - va0)), n);
+  // while(len > 0){
+  //   va0 = PGROUNDDOWN(srcva);
+  //   pa0 = walkaddr(pagetable, va0);
+  //   if(pa0 == 0)
+  //     return -1;
+  //   n = PGSIZE - (srcva - va0);
+  //   if(n > len)
+  //     n = len;
+  //   memmove(dst, (void *)(pa0 + (srcva - va0)), n);
 
-    len -= n;
-    dst += n;
-    srcva = va0 + PGSIZE;
-  }
-  return 0;
+  //   len -= n;
+  //   dst += n;
+  //   srcva = va0 + PGSIZE;
+  // }
+  // return 0;
+  return copyin_new(pagetable, dst, srcva, len);
 }
 
 // Copy a null-terminated string from user to kernel.
@@ -466,4 +469,91 @@ void _vmprint(pagetable_t pagetable, int level) {
 void vmprint(pagetable_t pagetable) {
   printf("page table %p\n", pagetable);
   _vmprint(pagetable, 0);
+}
+
+/////////////////////////////////////
+void
+proc_kvmmap(pagetable_t kpt, uint64 va, uint64 pa, uint64 sz, int perm)
+{
+  if(mappages(kpt, va, sz, pa, perm) != 0)
+    panic("proc_kvmmap");
+}
+
+pagetable_t proc_kpt_init() {
+  pagetable_t kpt = (pagetable_t) kalloc();
+  memset(kpt, 0, PGSIZE);
+
+  // uart registers
+  proc_kvmmap(kpt, UART0, UART0, PGSIZE, PTE_R | PTE_W);
+
+  // virtio mmio disk interface
+  proc_kvmmap(kpt, VIRTIO0, VIRTIO0, PGSIZE, PTE_R | PTE_W);
+
+  // CLINT
+  proc_kvmmap(kpt, CLINT, CLINT, 0x10000, PTE_R | PTE_W);
+
+  // PLIC
+  proc_kvmmap(kpt, PLIC, PLIC, 0x400000, PTE_R | PTE_W);
+
+  // map kernel text executable and read-only.
+  proc_kvmmap(kpt, KERNBASE, KERNBASE, (uint64)etext-KERNBASE, PTE_R | PTE_X);
+
+  // map kernel data and the physical RAM we'll make use of.
+  proc_kvmmap(kpt, (uint64)etext, (uint64)etext, PHYSTOP-(uint64)etext, PTE_R | PTE_W);
+
+  // map the trampoline for trap entry/exit to
+  // the highest virtual address in the kernel.
+  proc_kvmmap(kpt, TRAMPOLINE, (uint64)trampoline, PGSIZE, PTE_R | PTE_X);
+
+  return kpt;
+}
+
+void proc_kvminithart(pagetable_t kpt){
+  w_satp(MAKE_SATP(kpt));
+  sfence_vma();
+}
+
+// 释放进程的内核页表
+void free_proc_kpt(pagetable_t pagetable)
+{
+  // there are 2^9 = 512 PTEs in a page table.
+  for(int i = 0; i < 512; i++){
+    pte_t pte = pagetable[i];
+    if(pte & PTE_V){
+      // this PTE points to a lower-level page table.
+      uint64 child = PTE2PA(pte);
+      pagetable[i] = 0;
+      if((pte & (PTE_R|PTE_W|PTE_X)) == 0){// 说明不是第三级，进行递归
+        free_proc_kpt((pagetable_t)child);
+      }
+    } 
+  }
+  kfree((void*)pagetable);
+}
+
+
+// 仿照uvmcopy()函数，实现将用户空间的映射添加到每个进程的内核页表
+void 
+u2k_vmcopy(pagetable_t pagetable, pagetable_t kpt, uint64 oldsz, uint64 newsz){
+  pte_t *pte_from;
+  pte_t *pte_to;
+  oldsz = PGROUNDUP(oldsz);
+
+  for(uint64 i = oldsz; i < newsz; i += PGSIZE){
+    // 对页表pagetable中虚拟地址为i进行检查，检查pte是否存在
+    if((pte_from = walk(pagetable, i, 0)) == 0)
+      panic("u2k_vmcopy: pte should exist");
+    // 对内核页表kpt中虚拟地址为i进行检查，检查pte是否存在，若不存在则申请物理内存并映射。
+    if((pte_to = walk(kpt, i, 1)) == 0){
+      panic("u2k_vmcopy: pte walk fail");
+    }
+    // 在内核模式下，无法访问设置了PTE_U的页面,
+    // 所以接下来要获得pagetable中虚拟地址为i的pte的标志位
+    
+    // uint64 pa = PTE2PA(*pte_from);
+    // uint flags = (PTE_FLAGS(*pte_from)) & (~PTE_U);
+    // *pte_to = PA2PTE(pa) | flags;
+    // 感觉上面三句有点多，改成一句
+    *pte_to = (*pte_from) & (~PTE_U);
+  }
 }
